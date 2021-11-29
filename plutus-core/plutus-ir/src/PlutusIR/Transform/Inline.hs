@@ -396,6 +396,9 @@ firstEffectfulTerm = goTerm
         TyInst _ t _ -> goTerm t
         IWrap _ _ _ t -> goTerm t
         Unwrap _ t -> goTerm t
+        Constr _ _ _ [] -> Nothing
+        Constr _ _ _ (t:_) -> goTerm t
+        Case _ _ t _ -> goTerm t
 
         t@Var{} -> Just t
         t@Error{} -> Just t
@@ -475,6 +478,16 @@ costIsAcceptable = \case
   LamAbs{}   -> True
   TyAbs{}    -> True
 
+  -- Inlining constructors of size 1 or 0 seems okay, but does result in doing
+  -- the work for the elements at each use site.
+  Constr _ _ _ es  -> case es of
+      []  -> True
+      [e] -> costIsAcceptable e
+      _   -> False
+  -- Inlining tags and projections is acceptable, but does result in doing the work for the
+  -- body at each use site.
+  Case{} -> False
+
   -- Arguably we could allow these two, but they're uncommon anyway
   IWrap{}    -> False
   Unwrap{}   -> False
@@ -491,6 +504,13 @@ sizeIsAcceptable = \case
   Error{}    -> True
   LamAbs {}  -> False
   TyAbs {}   -> False
+
+  -- Inlining constructors of size 1 or 0 seems okay
+  Constr _ _ _ es  -> case es of
+      []  -> True
+      [e] -> sizeIsAcceptable e
+      _   -> False
+  Case{} -> False
 
   -- Arguably we could allow these two, but they're uncommon anyway
   IWrap{}    -> False

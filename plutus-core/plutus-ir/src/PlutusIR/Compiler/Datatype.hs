@@ -37,6 +37,7 @@ import Data.Text qualified as T
 import Data.Traversable
 
 import Data.List.NonEmpty qualified as NE
+import Data.String (fromString)
 
 {- NOTE [Normalization of data-constructors' types]
 
@@ -64,9 +65,17 @@ replaceFunTyTarget newTarget t = case t of
     _             -> newTarget
 
 -- | Given the type of a constructor, get the type of the "case" type with the given result type.
--- @constructorCaseType R (A->Maybe A) = (A -> R)@
-constructorCaseType :: Type tyname uni a -> VarDecl tyname name uni a -> Type tyname uni a
-constructorCaseType resultType = replaceFunTyTarget resultType . _varDeclType
+-- @constructorCaseType R (A->Maybe A) = ((prod [A]) -> R)@
+constructorCaseType :: a -> Type tyname uni a -> VarDecl tyname name uni a -> Type tyname uni a
+constructorCaseType ann resultType vd = PLC.mkIterTyFun ann (constructorCaseArgTypes vd) resultType
+
+constructorCaseArgTypes :: VarDecl tyname name uni a -> [Type tyname uni a]
+constructorCaseArgTypes vd = funTyArgs (_varDeclType vd)
+
+constructorArgsType :: a -> VarDecl tyname name uni a -> Type tyname uni a
+constructorArgsType ann vd =
+    let ctype = _varDeclType vd
+    in TyProd ann (funTyArgs ctype)
 
 -- | Get recursively all the domains and codomains of a type.
 -- @funTySections (A->B->C) = [A, B, C]@
@@ -264,19 +273,29 @@ mkScottTy :: MonadQuote m => ann -> Datatype TyName Name uni ann -> m (Type TyNa
 mkScottTy ann d@(Datatype _ _ _ _ constrs) = do
     resultType <- resultTypeName d
      -- FIXME: normalize datacons' types also here
-    let caseTys = fmap (constructorCaseType (TyVar ann resultType)) constrs
+    let caseTys = fmap (constructorCaseType ann (TyVar ann resultType)) constrs
     pure $
         -- forall resultType
         TyForall ann resultType (Type ann) $
         -- c_1 -> .. -> c_n -> resultType
         PIR.mkIterTyFun ann caseTys (TyVar ann resultType)
 
+mkSumTy :: MonadQuote m => ann -> Datatype TyName Name uni ann -> m (Type TyName uni ann)
+mkSumTy ann (Datatype _ _ _ _ constrs) = do
+    let constrArgs = fmap (constructorArgsType ann) constrs
+    pure $ TySum ann constrArgs
+
 -- | Make the "pattern functor" of a 'Datatype'. This is just the normal type, but with the
 -- type variable for the type itself free and its type variables free.
 -- @mkDatatypePatternFunctor List = forall (r :: *) . r -> (a -> List a -> r) -> r@
 -- FIXME: inline this
 mkDatatypePatternFunctor :: MonadQuote m => ann -> Datatype TyName Name uni ann -> m (Type TyName uni ann)
-mkDatatypePatternFunctor ann d = mkScottTy ann d
+mkDatatypePatternFunctor ann d = mkSumTy ann d
+
+mkBoundDatatypePatternFunctor :: MonadQuote m => ann -> Datatype TyName Name uni ann -> m (Type TyName uni ann)
+mkBoundDatatypePatternFunctor ann d@(Datatype _ tv _ _ _) = do
+    st <- mkDatatypePatternFunctor ann d
+    pure $ PIR.mkIterTyLam [tv] st
 
 -- | Make the real PLC type corresponding to a 'Datatype' with the given pattern functor.
 -- @
@@ -286,7 +305,7 @@ mkDatatypePatternFunctor ann d = mkScottTy ann d
 -- @
 mkDatatypeType :: forall m uni fun a. MonadQuote m => Recursivity -> PIRType uni a -> Datatype TyName Name uni (Provenance a) -> m (PLCRecType uni fun a)
 mkDatatypeType r pf (Datatype ann tn tvs _ _) = case r of
-    NonRec -> PlainType <$> (PLC.mkIterTyLam <$> pure tvs <*> pure pf)
+    NonRec -> pure $ PlainType $ PLC.mkIterTyLam tvs pf
     -- See note [Recursive datatypes]
     -- We are reusing the same type name for the fixpoint variable. This is fine
     -- so long as we do renaming later, since we only reuse the name inside an inner binder
@@ -324,20 +343,11 @@ mkConstructorType (Datatype _ _ tvs _ _) constr =
 -- @
 mkConstructor :: MonadQuote m => PLCRecType uni fun a -> Datatype TyName Name uni (Provenance a) -> Int -> m (PIRTerm uni fun a)
 mkConstructor dty d@(Datatype ann _ tvs _ constrs) index = do
-    resultType <- resultTypeName d
-
-    -- case arguments and their types
-    casesAndTypes <- do
-          -- these types appear *outside* the scope of the abstraction for the datatype, so we need to use the concrete datatype here
-          -- see note [Abstract data types]
-          -- FIXME: normalize datacons' types also here
-          let caseTypes = unveilDatatype (getType dty) d <$> fmap (constructorCaseType (TyVar ann resultType)) constrs
-          caseArgNames <- for constrs (\c -> safeFreshName $ "case_" <> T.pack (varDeclNameString c))
-          pure $ zipWith (VarDecl ann) caseArgNames caseTypes
-
     -- This is inelegant, but it should never fail
     let thisConstr = constrs !! index
-    let thisCase = PIR.mkVar ann $ casesAndTypes !! index
+
+    boundPf <- mkBoundDatatypePatternFunctor ann d
+    let unrolled = TyApp ann boundPf (getType dty)
 
     -- constructor args and their types
     argsAndTypes <- do
@@ -349,7 +359,6 @@ mkConstructor dty d@(Datatype ann _ tvs _ constrs) index = do
         argNames <- for [0..(length argTypes -1)] (\i -> safeFreshName $ "arg_" <> showText i)
         pure $ zipWith (VarDecl ann) argNames argTypes
 
-
     let constr =
             -- /\t_1 .. t_n
             PIR.mkIterTyAbs tvs $
@@ -357,14 +366,31 @@ mkConstructor dty d@(Datatype ann _ tvs _ constrs) index = do
             PIR.mkIterLamAbs argsAndTypes $
             -- See Note [Recursive datatypes]
             -- wrap
-            wrap ann dty (fmap (PIR.mkTyVar ann) tvs)$
-            -- forall out
-            TyAbs ann resultType (Type ann) $
-            -- \case_1 .. case_j
-            PIR.mkIterLamAbs casesAndTypes $
-            -- c_i arg_1 .. arg_m
-            PIR.mkIterApp ann thisCase (fmap (PIR.mkVar ann) argsAndTypes)
+            wrap ann dty (fmap (PIR.mkTyVar ann) tvs) $
+            Constr ann unrolled index (fmap (PIR.mkVar ann) argsAndTypes)
     pure $ fmap (\a -> DatatypeComponent Constructor a) constr
+
+-- TODO: test this independently!
+-- | Eta-expand a term for 'arity' arguments, given the term and the type of the term.
+etaExpand :: MonadQuote m => a -> Int -> Term TyName Name uni fun a -> Type TyName uni a -> m (Term TyName Name uni fun a)
+etaExpand ann arity term termTy = do
+    apps <- computeApps [] arity termTy
+    pure $ makeApps [] term (reverse apps)
+  where
+      computeApps acc 0 _ = pure acc
+      computeApps acc i (TyFun _ dom cod) = do
+        e <- freshName $ "arg" <> (fromString $ show i)
+        let vd = PLC.VarDecl ann e dom
+            rhs = Var ann e
+            def = PLC.Def vd rhs
+        computeApps (def:acc) (i-1) cod
+      computeApps _ _ _ = error "can't eta expand a non-function"
+
+      makeApps vds acc (PLC.Def vd rhs:rest) = makeApps (vd:vds) (Apply ann acc rhs) rest
+      makeApps vds acc []                    = makeLams vds acc
+
+      makeLams ((PLC.VarDecl a n ty):vds) acc = makeLams vds (LamAbs a n ty acc)
+      makeLams [] acc                         = acc
 
 -- Destructors
 
@@ -376,11 +402,28 @@ mkConstructor dty d@(Datatype ann _ tvs _ constrs) index = do
 --        = /\(a :: *) -> \(x : (fix List . \(a :: *) -> forall (r :: *) . r -> (a -> List a -> r) -> r) a) -> unwrap x
 -- @
 mkDestructor :: MonadQuote m => PLCRecType uni fun a -> Datatype TyName Name uni (Provenance a) -> m (PIRTerm uni fun a)
-mkDestructor dty (Datatype ann _ tvs _ _) = do
+mkDestructor dty d@(Datatype ann _ tvs _ constrs) = do
+    resultType <- resultTypeName d
     -- This term appears *outside* the scope of the abstraction for the datatype, so we need to put in the Scott-encoded type here
     -- see note [Abstract data types]
     -- dty t_1 .. t_n
     let appliedReal = PIR.mkIterTyApp ann (getType dty) (fmap (PIR.mkTyVar ann) tvs)
+
+    -- Variables for case arguments, and the bodies to be used as the actual cases
+    caseVarsAndBodies <- for constrs $ \c -> do
+        -- these types appear *outside* the scope of the abstraction for the datatype, so we need to use the concrete datatype here
+        -- see note [Abstract data types]
+        -- FIXME: normalize datacons' types also here
+        let caseType = constructorCaseType ann (TyVar ann resultType) c
+            arity = length $ funTyArgs caseType
+            unveiledCaseType = unveilDatatype (getType dty) d caseType
+        caseArgName <- safeFreshName $ "case_" <> T.pack (varDeclNameString c)
+        let caseVar = VarDecl ann caseArgName unveiledCaseType
+        -- We're requiring case bodies to be lambdas, but at this point they're
+        -- unknown functions passed into the destructor. So we just eta-expand them.
+        caseBody <- etaExpand ann arity (PIR.mkVar ann caseVar) unveiledCaseType
+
+        pure (caseVar, caseBody)
 
     xn <- safeFreshName "x"
     let destr =
@@ -388,10 +431,13 @@ mkDestructor dty (Datatype ann _ tvs _ _) = do
             PIR.mkIterTyAbs tvs $
             -- \x
             LamAbs ann xn appliedReal $
+            -- forall out
+            TyAbs ann resultType (Type ann) $
+            -- \case_1 .. case_j
+            PIR.mkIterLamAbs (fmap fst caseVarsAndBodies) $
             -- See note [Recursive datatypes]
-            -- unwrap
-            unwrap ann dty $
-            Var ann xn
+            -- case (unwrap x) case_1 .. case_j
+            Case ann (TyVar ann resultType) (unwrap ann dty $ Var ann xn) (fmap snd caseVarsAndBodies)
     pure $ fmap (\a -> DatatypeComponent Destructor a) destr
 
 -- See note [Scott encoding of datatypes]
@@ -401,8 +447,8 @@ mkDestructor dty (Datatype ann _ tvs _ _) = do
 --         = forall (a :: *) . (List a) -> (<pattern functor of List>)
 --         = forall (a :: *) . (List a) -> (forall (out_List :: *) . (out_List -> (a -> List a -> out_List) -> out_List))
 -- @
-mkDestructorTy :: PIRType uni a -> Datatype TyName Name uni (Provenance a) -> PIRType uni a
-mkDestructorTy pf dt@(Datatype ann _ tvs _ _) =
+mkDestructorTy :: MonadQuote m => Provenance a -> Datatype TyName Name uni (Provenance a) -> m (PIRType uni a)
+mkDestructorTy ann dt@(Datatype _ _ tvs _ _) = do
     -- we essentially "unveil" the abstract type, so this
     -- is a function from the (instantiated) abstract type
     -- to the (unwrapped, i.e. the pattern functor of the) "real" Scott-encoded type that we can use as
@@ -413,9 +459,10 @@ mkDestructorTy pf dt@(Datatype ann _ tvs _ _) =
     -- see note [Abstract data types]
     -- t t_1 .. t_n
     let appliedAbstract = mkDatatypeValueType ann dt
+    scottTy <- mkScottTy ann dt
     -- forall t_1 .. t_n
-        destrTy = PIR.mkIterTyForall tvs $ TyFun ann appliedAbstract pf
-    in fmap (\a -> DatatypeComponent DestructorType a) destrTy
+    let destrTy = PIR.mkIterTyForall tvs $ TyFun ann appliedAbstract scottTy
+    pure $ fmap (\a -> DatatypeComponent DestructorType a) destrTy
 
 -- The main function
 
@@ -450,7 +497,7 @@ compileDatatypeDefs r d@(Datatype ann tn _ destr constrs) = do
         PIR.Def (VarDecl (DatatypeComponent Constructor ann) (_varDeclName c) constrTy) <$> mkConstructor (PIR.defVal concreteTyDef) d i
 
     destrDef <- do
-        let destTy = mkDestructorTy pf d
+        destTy <- mkDestructorTy ann d
         PIR.Def (VarDecl (DatatypeComponent Destructor ann) destr destTy) <$> mkDestructor (PIR.defVal concreteTyDef) d
 
     pure (concreteTyDef, constrDefs, destrDef)

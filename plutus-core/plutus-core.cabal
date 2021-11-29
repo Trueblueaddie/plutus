@@ -315,6 +315,7 @@ library
     , time
     , transformers
     , unordered-containers
+    , vector
     , witherable
     , word-array
 

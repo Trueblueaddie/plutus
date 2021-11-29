@@ -75,6 +75,7 @@ isPure ver varStrictness = go
             LamAbs {} -> True
             TyAbs {} -> True
             Constant {} -> True
+            -- Dubious?
             IWrap _ _ _ t -> go t
 
             x | Just bapp@(BuiltinApp _ args) <- asBuiltinApp x ->

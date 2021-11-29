@@ -19,7 +19,7 @@ module PlutusCore.Generators.Internal.Builtin (
     genConstr,
 ) where
 
-import PlutusCore
+import PlutusCore hiding (Constr)
 import PlutusCore.Builtin
 import PlutusCore.Data (Data (..))
 import PlutusCore.Generators.AST hiding (genConstant)

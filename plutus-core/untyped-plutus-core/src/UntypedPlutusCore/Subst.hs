@@ -70,6 +70,8 @@ termSubstFreeNamesA f = go Set.empty where
     go bvs (Apply ann fun arg)    = Apply ann <$> go bvs fun <*> go bvs arg
     go bvs (Delay ann term)       = Delay ann <$> go bvs term
     go bvs (Force ann term)       = Force ann <$> go bvs term
+    go bvs (Constr ann i es)       = Constr ann i <$> traverse (go bvs) es
+    go bvs (Case ann arg cs)      = Case ann <$> go bvs arg <*> traverse (go bvs) cs
     go _   term@Constant{}        = pure term
     go _   term@Builtin{}         = pure term
     go _   term@Error{}           = pure term
@@ -99,6 +101,8 @@ termMapNames f = go
             Apply ann t1 t2      -> Apply ann (go t1) (go t2)
             Delay ann t          -> Delay ann (go t)
             Force ann t          -> Force ann (go t)
+            Constr ann i es      -> Constr ann i (fmap go es)
+            Case ann arg cs      -> Case ann (go arg) (fmap go cs)
 
             Constant ann c       -> Constant ann c
             Builtin ann b        -> Builtin ann b
