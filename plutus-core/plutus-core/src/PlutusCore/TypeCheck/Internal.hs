@@ -38,7 +38,7 @@ import Control.Monad.Trans.Reader
 import Data.Array
 import Data.Foldable (for_)
 import Data.List.Extra ((!?))
-import Universe (GEq, HasUniApply, Some (Some), SomeTypeIn (SomeTypeIn), ValueOf (ValueOf))
+import Universe (GEq, Some (Some), SomeTypeIn (SomeTypeIn), ValueOf (ValueOf))
 
 {- Note [Global uniqueness]
 WARNING: type inference/checking works under the assumption that the global uniqueness condition
