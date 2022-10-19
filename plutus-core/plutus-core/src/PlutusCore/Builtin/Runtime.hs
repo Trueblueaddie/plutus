@@ -4,14 +4,12 @@
 
 module PlutusCore.Builtin.Runtime where
 
+import PlutusPrelude
+
 import PlutusCore.Builtin.KnownType
 import PlutusCore.Evaluation.Machine.ExBudget
-import PlutusCore.Evaluation.Machine.Exception
 
 import Control.DeepSeq
-import Control.Lens (ix, (^?))
-import Control.Monad.Except
-import Data.Array
 import NoThunks.Class
 
 -- | A 'BuiltinRuntime' represents a possibly partial builtin application.
@@ -93,20 +91,18 @@ instance NFData (BuiltinRuntime val) where
 -- 'BuiltinRuntime' in an array, but we've tried it and it was much slower as we do rely on caching
 -- (especially for costing).
 newtype BuiltinsRuntime fun val = BuiltinsRuntime
-    { unBuiltinRuntime :: Array fun (BuiltinRuntime val)
+    { unBuiltinRuntime :: fun -> BuiltinRuntime val
     }
 
-deriving newtype instance (NFData fun) => NFData (BuiltinsRuntime fun val)
+instance (Bounded fun, Enum fun) => NFData (BuiltinsRuntime fun val) where
+    rnf (BuiltinsRuntime env) = foldr (\fun res -> env fun `seq` res) () enumerate
 
 instance NoThunks (BuiltinsRuntime fun val) where
-    wNoThunks ctx (BuiltinsRuntime arr) = allNoThunks (noThunks ctx <$> elems arr)
+    wNoThunks ctx (BuiltinsRuntime env) = noThunks ctx env
     showTypeOf = const "PlutusCore.Builtin.Runtime.BuiltinsRuntime"
 
 -- | Look up the runtime info of a built-in function during evaluation.
-lookupBuiltin
-    :: (MonadError (ErrorWithCause err cause) m, AsMachineError err fun, Ix fun)
-    => fun -> BuiltinsRuntime fun val -> m (BuiltinRuntime val)
+lookupBuiltin :: fun -> BuiltinsRuntime fun val -> BuiltinRuntime val
 -- @Data.Array@ doesn't seem to have a safe version of @(!)@, hence we use a prism.
-lookupBuiltin fun (BuiltinsRuntime env) = case env ^? ix fun of
-    Nothing      -> throwingWithCause _MachineError (UnknownBuiltin fun) Nothing
-    Just runtime -> pure runtime
+lookupBuiltin fun (BuiltinsRuntime env) = env fun
+{-# INLINE lookupBuiltin #-}
