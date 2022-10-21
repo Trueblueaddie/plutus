@@ -20,6 +20,11 @@ inputs.std.lib.dev.mkShell {
       help = "For nix maintainers: build everything in the flake";
     }
     {
+      package = cell.packages.scriv;
+      category = "general commands";
+      help = "Manage changelogs";
+    }
+    {
       package = cell.packages.fix-cabal-fmt;
       category = "plutus";
       help = "Format all cabal files in-place";
